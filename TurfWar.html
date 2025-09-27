@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Two-Agent Territory Race (Red vs Green)</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#0f1730; --ink:#e8eefc; --muted:#9fb3ff;
+    --green:#19d38a; --red:#ff5252; --blue:#4da3ff; --unknown:#0b1533; --grid:#1a264a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #wrap{position:fixed; inset:0; display:grid; grid-template-rows:auto 1fr; gap:0}
+  header{display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--panel); border-bottom:1px solid #152347; flex-wrap:wrap}
+  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+  .spacer{flex:1}
+  .btn, .num, .range {
+    background:#0b1533; color:var(--ink); border:1px solid #2a3c74; padding:6px 10px; border-radius:10px;
+  }
+  .btn{cursor:pointer; transition:.2s transform, .2s background}
+  .btn:hover{background:#0e1a3f; transform:translateY(-1px)}
+  .stat{font-variant-numeric:tabular-nums}
+  main{display:grid; grid-template-columns:1fr 300px; gap:0}
+  #view{display:block; width:100%; height:100%; background:var(--unknown)}
+  aside{background:var(--panel); border-left:1px solid #152347; padding:12px}
+  .row{display:flex; align-items:center; gap:10px; margin-bottom:10px}
+  .bar{height:12px; background:#0b1533; border:1px solid #2a3c74; border-radius:8px; overflow:hidden}
+  .bar > div{height:100%}
+  .bar .g{background:var(--green)}
+  .bar .r{background:var(--red)}
+  footer{margin-top:10px; color:#9fb3ff99; font-size:12px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>Territory Race — Green vs Red</h1>
+    <div class="spacer"></div>
+    <div class="row">
+      <label>Grid</label>
+      <input id="gridN" class="num" type="number" min="30" max="160" value="80" style="width:72px">
+    </div>
+    <div class="row">
+      <label>Obstacles</label>
+      <input id="obsPct" class="num" type="number" min="0" max="50" value="15" style="width:72px">
+      <span class="stat">%</span>
+    </div>
+    <div class="row">
+      <label>Speed</label>
+      <input id="speed" class="range" type="range" min="1" max="30" value="10">
+      <span class="stat" id="speedVal">10</span>
+    </div>
+    <button id="btnReset" class="btn">Reset Same Map</button>
+    <button id="btnRegen" class="btn">Regenerate Map</button>
+    <button id="btnPause" class="btn">Pause</button>
+  </header>
+
+  <main>
+    <canvas id="view"></canvas>
+    <aside>
+      <div class="row" style="justify-content:space-between">
+        <div>Green tiles:</div><div class="stat" id="gCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Red tiles:</div><div class="stat" id="rCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Free tiles (score base):</div><div class="stat" id="freeCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Green %:</div><div class="stat" id="gPct">0.0%</div>
+      </div>
+      <div class="bar"><div class="g" id="gBar" style="width:0%"></div></div>
+      <div class="row" style="justify-content:space-between; margin-top:10px">
+        <div>Red %:</div><div class="stat" id="rPct">0.0%</div>
+      </div>
+      <div class="bar"><div class="r" id="rBar" style="width:0%"></div></div>
+      <footer style="margin-top:12px">
+        • Agents start in opposite corners and paint the floor as they move.<br/>
+        • Obstacles (blue) block movement and are excluded from percentages.<br/>
+        • First touch claims a tile; no overwriting.
+      </footer>
+    </aside>
+  </main>
+</div>
+
+<script>
+(() => {
+  // ====== DOM ======
+  const cvs = document.getElementById('view');
+  const ctx = cvs.getContext('2d');
+  const gridNEl = document.getElementById('gridN');
+  const obsPctEl = document.getElementById('obsPct');
+  const speedEl = document.getElementById('speed');
+  const speedVal = document.getElementById('speedVal');
+  const btnReset = document.getElementById('btnReset');
+  const btnRegen = document.getElementById('btnRegen');
+  const btnPause = document.getElementById('btnPause');
+  const gCountEl = document.getElementById('gCount');
+  const rCountEl = document.getElementById('rCount');
+  const freeCountEl = document.getElementById('freeCount');
+  const gPctEl = document.getElementById('gPct');
+  const rPctEl = document.getElementById('rPct');
+  const gBar = document.getElementById('gBar');
+  const rBar = document.getElementById('rBar');
+
+  // ====== Colors ======
+  const COL_BG   = getComputedStyle(document.documentElement).getPropertyValue('--unknown').trim() || '#0b1533';
+  const COL_GRID = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim()    || '#1a264a';
+  const COL_GREEN= getComputedStyle(document.documentElement).getPropertyValue('--green').trim()   || '#19d38a';
+  const COL_RED  = getComputedStyle(document.documentElement).getPropertyValue('--red').trim()     || '#ff5252';
+  const COL_BLUE = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim()    || '#4da3ff';
+
+  // ====== Room / Grid ======
+  let N = Number(gridNEl.value);   // grid size (NxN)
+  const TILE_EMPTY = 0;
+  const TILE_OBS   = 1;
+  const CLAIM_NONE = 0;
+  const CLAIM_GREEN= 1;
+  const CLAIM_RED  = 2;
+
+  // Arrays (flat)
+  let tiles;     // 0 empty, 1 obstacle
+  let claim;     // 0 none, 1 green, 2 red
+  let totalFree = 0;
+
+  // Agents (grid coords)
+  const agents = [
+    { // Green (top-left)
+      color: CLAIM_GREEN,
+      x: 1, y: 1,
+      lastMoveDir: null
+    },
+    { // Red (bottom-right)
+      color: CLAIM_RED,
+      x: null, y: null,
+      lastMoveDir: null
+    }
+  ];
+
+  // Sim/Tuning
+  let paused = false;
+  let speedStepsPerFrame = Number(speedEl.value); // how many cell-steps per frame per agent
+
+  function idx(x,y){ return y*N + x; }
+  function inB(x,y){ return x>=0 && x<N && y>=0 && y<N; }
+
+  // ====== Map Gen ======
+  let seededMap = null; // keep last map to "Reset Same Map"
+
+  function generateMap(seed=null){
+    if(seed){
+      // reuse
+      ({N, tiles, claim, totalFree} = seed);
+      return;
+    }
+    N = Number(gridNEl.value);
+    tiles = new Uint8Array(N*N);
+    claim = new Uint8Array(N*N);
+
+    // obstacles % of total cells (roughly, with blob-like shapes)
+    const pct = Math.max(0, Math.min(50, Number(obsPctEl.value))) / 100;
+    const targetObs = Math.round(N*N*pct);
+
+    // carve random blobs
+    let placed = 0;
+    const triesMax = N*N*5;
+    let tries = 0;
+    while(placed < targetObs && tries < triesMax){
+      tries++;
+      const w = 2 + (Math.random()*6)|0;
+      const h = 2 + (Math.random()*6)|0;
+      const x0 = (Math.random()*(N-w))|0;
+      const y0 = (Math.random()*(N-h))|0;
+
+      // avoid starting corners
+      if ((x0<=2 && y0<=2) || (x0+w>=N-3 && y0+h>=N-3)) continue;
+
+      for(let y=y0; y<y0+h && placed < targetObs; y++){
+        for(let x=x0; x<x0+w && placed < targetObs; x++){
+          const id = idx(x,y);
+          if(tiles[id] === TILE_EMPTY){
+            tiles[id] = TILE_OBS; placed++;
+          }
+        }
+      }
+    }
+
+    // compute free & ensure spawns are free
+    const topLeft = idx(1,1);
+    const botRight = idx(N-2, N-2);
+    tiles[topLeft]  = TILE_EMPTY;
+    tiles[botRight] = TILE_EMPTY;
+
+    totalFree = 0;
+    for(let i=0;i<tiles.length;i++) if(tiles[i]===TILE_EMPTY) totalFree++;
+
+    seededMap = {N, tiles: tiles.slice(0), claim: new Uint8Array(tiles.length), totalFree};
+  }
+
+  function resetAgents(){
+    agents[0].x = 1; agents[0].y = 1;  agents[0].lastMoveDir = null; // green
+    agents[1].x = N-2; agents[1].y = N-2; agents[1].lastMoveDir = null; // red
+    claim.fill(CLAIM_NONE);
+    // claim starting tiles
+    claim[idx(agents[0].x, agents[0].y)] = CLAIM_GREEN;
+    claim[idx(agents[1].x, agents[1].y)] = CLAIM_RED;
+  }
+
+  // ====== Movement ======
+  // Try to bias toward unclaimed neighbors; fallback to any free; avoid direct backtracking if possible.
+  const DIRS = [
+    {dx: 1, dy: 0},  // right
+    {dx:-1, dy: 0},  // left
+    {dx: 0, dy: 1},  // down
+    {dx: 0, dy:-1},  // up
+  ];
+
+  function stepAgent(a){
+    // build neighbor options
+    const opts = [];
+    const back = a.lastMoveDir ? {dx:-a.lastMoveDir.dx, dy:-a.lastMoveDir.dy} : null;
+
+    for(const d of DIRS){
+      const nx = a.x + d.dx, ny = a.y + d.dy;
+      if(!inB(nx,ny)) continue;
+      const id = idx(nx,ny);
+      if(tiles[id] === TILE_OBS) continue; // obstacle blocks
+      // prefer unclaimed
+      const isUnclaimed = (claim[id] === CLAIM_NONE);
+      const isBack = back && back.dx === d.dx && back.dy === d.dy;
+      const score = (isUnclaimed ? 2 : 1) - (isBack ? 0.4 : 0);
+      opts.push({d, nx, ny, score});
+    }
+    if(!opts.length) return; // stuck (rare)
+
+    // Choose weighted by score (softmax-lite)
+    let sum = 0;
+    for(const o of opts){ sum += Math.max(0.01, o.score); }
+    let r = Math.random()*sum;
+    let chosen = opts[0];
+    for(const o of opts){
+      r -= Math.max(0.01, o.score);
+      if(r<=0){ chosen = o; break; }
+    }
+
+    a.x = chosen.nx; a.y = chosen.ny;
+    a.lastMoveDir = chosen.d;
+
+    // claim if unclaimed
+    const cid = idx(a.x, a.y);
+    if (claim[cid] === CLAIM_NONE){
+      claim[cid] = a.color;
+    }
+  }
+
+  // ====== Stats ======
+  function recount(){
+    let g=0, r=0;
+    for(let i=0;i<claim.length;i++){
+      if(tiles[i]===TILE_OBS) continue;
+      if(claim[i]===CLAIM_GREEN) g++;
+      else if(claim[i]===CLAIM_RED) r++;
+    }
+    const gPct = totalFree ? (g/totalFree*100) : 0;
+    const rPct = totalFree ? (r/totalFree*100) : 0;
+    gCountEl.textContent = g;
+    rCountEl.textContent = r;
+    freeCountEl.textContent = totalFree;
+    gPctEl.textContent = gPct.toFixed(1) + '%';
+    rPctEl.textContent = rPct.toFixed(1) + '%';
+    gBar.style.width = gPct.toFixed(3) + '%';
+    rBar.style.width = rPct.toFixed(3) + '%';
+  }
+
+  // ====== Render ======
+  function resizeCanvas(){
+    // Make canvas fill its grid area with 1:1 pixels
+    const rect = cvs.parentElement.getBoundingClientRect();
+    const size = Math.min(rect.width, rect.height);
+    // Try to use an integer multiple of N for crisp tiles:
+    const scale = Math.max(1, Math.floor(size / N));
+    const w = N * scale, h = N * scale;
+    cvs.width = w; cvs.height = h;
+    cvs.style.width = w + 'px';
+    cvs.style.height = h + 'px';
+  }
+  new ResizeObserver(resizeCanvas).observe(cvs);
+  resizeCanvas();
+
+  function draw(){
+    const w = cvs.width, h = cvs.height;
+    const s = Math.floor(w / N); // tile size (integer)
+    ctx.fillStyle = COL_BG;
+    ctx.fillRect(0,0,w,h);
+
+    // draw floor by state
+    for(let y=0;y<N;y++){
+      for(let x=0;x<N;x++){
+        const id = idx(x,y);
+        if(tiles[id] === TILE_OBS){
+          ctx.fillStyle = COL_BLUE;
+        } else {
+          const c = claim[id];
+          if(c===CLAIM_GREEN) ctx.fillStyle = COL_GREEN;
+          else if(c===CLAIM_RED) ctx.fillStyle = COL_RED;
+          else ctx.fillStyle = COL_BG;
+        }
+        ctx.fillRect(x*s, y*s, s, s);
+      }
+    }
+    // optional subtle grid (comment out to hide)
+    ctx.strokeStyle = COL_GRID;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let x=0; x<=N; x++){
+      ctx.moveTo(x*s+0.5, 0.5); ctx.lineTo(x*s+0.5, N*s+0.5);
+    }
+    for(let y=0; y<=N; y++){
+      ctx.moveTo(0.5, y*s+0.5); ctx.lineTo(N*s+0.5, y*s+0.5);
+    }
+    ctx.stroke();
+  }
+
+  // ====== Control Events ======
+  speedEl.addEventListener('input', () => {
+    speedStepsPerFrame = Number(speedEl.value);
+    speedVal.textContent = String(speedStepsPerFrame);
+  });
+  speedVal.textContent = String(speedStepsPerFrame);
+
+  btnPause.addEventListener('click', () => {
+    paused = !paused;
+    btnPause.textContent = paused ? 'Resume' : 'Pause';
+  });
+
+  btnReset.addEventListener('click', () => {
+    // Reset on same map
+    if(seededMap) {
+      generateMap(seededMap);
+      // restore claim blank, seed claim is empty by design
+      claim = new Uint8Array(N*N);
+    }
+    resetAgents();
+    recount();
+    draw();
+  });
+
+  btnRegen.addEventListener('click', () => {
+    seededMap = null;
+    generateMap(null);
+    resetAgents();
+    recount();
+    draw();
+  });
+
+  gridNEl.addEventListener('change', () => {
+    seededMap = null;
+    generateMap(null);
+    resetAgents();
+    resizeCanvas();
+    recount();
+    draw();
+  });
+  obsPctEl.addEventListener('change', () => {
+    seededMap = null;
+    generateMap(null);
+    resetAgents();
+    recount();
+    draw();
+  });
+
+  // ====== Init ======
+  generateMap(null);
+  resetAgents();
+  recount();
+  draw();
+
+  // ====== Loop ======
+  function tick(){
+    if(!paused){
+      // multiple steps per frame for decent speed
+      for(let k=0;k<speedStepsPerFrame;k++){
+        stepAgent(agents[0]); // green
+        stepAgent(agents[1]); // red
+      }
+      recount();
+      draw();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

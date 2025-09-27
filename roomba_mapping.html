@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Roomba Mapping Demo — Three.js + Minimap</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#0f1730; --ink:#e8eefc; --muted:#9fb3ff; --accent:#7ee787; --warn:#ff7b72; --grid:#1a264a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #wrap{position:fixed; inset:0; display:grid; grid-template-columns:1fr minmax(280px,360px); grid-template-rows:auto 1fr; gap:0; min-height:100vh}
+  header{grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--panel); border-bottom:1px solid #152347; flex-wrap:wrap}
+  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+  header .spacer{flex:1}
+  header .btn, header .num, header .chk{
+    background:#0b1533; color:var(--ink); border:1px solid #2a3c74; padding:6px 10px; border-radius:10px;
+  }
+  header .btn{cursor:pointer; transition:.2s transform, .2s background}
+  header .btn:hover{background:#0e1a3f; transform:translateY(-1px)}
+  main{position:relative; overflow:hidden}
+  #view{position:absolute; inset:0; display:block; width:100%; height:100%}
+  aside{background:var(--panel); border-left:1px solid #152347; display:flex; flex-direction:column}
+  .card{padding:12px; border-bottom:1px solid #152347}
+  .card h2{margin:0 0 10px; font-size:14px; font-weight:600; color:var(--muted)}
+  #minimap{width:100%; height:auto; background:#061129; border:1px solid #152347; border-radius:12px}
+  .legend{display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center; font-size:12px; color:#cdd8ff}
+  .dot{width:14px; height:14px; border-radius:3px}
+  .v{background:#6b7bbf}
+  .o{background:#ff7b72}
+  .a{background:#7ee787}
+  .unknown{background:#0b1533}
+  .row{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  input[type="range"]{width:140px}
+  .stat{font-variant-numeric:tabular-nums}
+  footer{margin-top:auto; padding:10px 12px; color:#9fb3ff99; font-size:12px}
+</style>
+
+<!-- Use ES modules from CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="wrap">
+    <header>
+      <h1>Roomba Mapping Demo</h1>
+      <div class="spacer"></div>
+      <label class="row" style="margin:0 6px 0 0;">
+        <span>Speed</span>
+        <input id="speed" type="range" min="0" max="200" value="60">
+        <span class="stat" id="speedVal">0.60</span>
+      </label>
+      <label class="row" style="margin:0 6px 0 0;">
+        <span>Turn jitter</span>
+        <input id="jitter" type="range" min="0" max="100" value="20">
+        <span class="stat" id="jitterVal">0.20</span>
+      </label>
+      <label class="row" style="margin:0 6px 0 0;">
+        <span>Obstacles</span>
+        <input id="obsCount" class="num" type="number" min="5" max="200" value="45" style="width:72px">
+      </label>
+      <button id="btnPause" class="btn">Pause</button>
+      <button id="btnReset" class="btn">Reset Agent</button>
+      <button id="btnRegen" class="btn">Regenerate Room</button>
+    </header>
+
+    <main>
+      <canvas id="view"></canvas>
+    </main>
+
+    <aside>
+      <div class="card">
+        <h2>Minimap (Discovered)</h2>
+        <canvas id="minimap" width="320" height="320"></canvas>
+        <div class="legend" style="margin-top:10px">
+          <div class="dot unknown"></div><div>Unknown</div>
+          <div class="dot v"></div><div>Visited / Free</div>
+          <div class="dot o"></div><div>Obstacle contact</div>
+          <div class="dot a"></div><div>Agent</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Stats</h2>
+        <div class="row"><span>Visited cells:</span><span class="stat" id="cellsVisited">0</span></div>
+        <div class="row"><span>Obstacle hits:</span><span class="stat" id="hits">0</span></div>
+        <div class="row"><span>Time (s):</span><span class="stat" id="time">0.0</span></div>
+      </div>
+      <footer>
+        The agent does not know the room shape. It only marks places it has been and where it collided.
+      </footer>
+    </aside>
+  </div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- DOM ----------
+const cvs = document.getElementById('view');
+const mini = document.getElementById('minimap');
+const ctx2d = mini.getContext('2d');
+const btnPause = document.getElementById('btnPause');
+const btnReset = document.getElementById('btnReset');
+const btnRegen = document.getElementById('btnRegen');
+const speedEl = document.getElementById('speed');
+const speedVal = document.getElementById('speedVal');
+const jitterEl = document.getElementById('jitter');
+const jitterVal = document.getElementById('jitterVal');
+const obsCountEl = document.getElementById('obsCount');
+const cellsVisitedEl = document.getElementById('cellsVisited');
+const hitsEl = document.getElementById('hits');
+const timeEl = document.getElementById('time');
+
+// ---------- Scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: cvs, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x061129);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+camera.position.set(18, 16, 18);
+camera.lookAt(0, 0, 0);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+
+// Light
+const hemi = new THREE.HemisphereLight(0xffffff, 0x223355, 0.7);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+dir.position.set(10, 15, 10);
+scene.add(dir);
+
+// ---------- Room ----------
+const roomSize = 30;  // width = depth = 30 units
+const wallH = 4;
+
+const floor = (() => {
+  const g = new THREE.PlaneGeometry(roomSize, roomSize, 1, 1);
+  const m = new THREE.MeshStandardMaterial({ color: 0x0b1533, metalness: 0.1, roughness: 0.9 });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.rotation.x = -Math.PI/2;
+  mesh.receiveShadow = true;
+  // subtle grid
+  const grid = new THREE.GridHelper(roomSize, 30, 0x1a264a, 0x1a264a);
+  grid.position.y = 0.001;
+  scene.add(grid);
+  return mesh;
+})();
+scene.add(floor);
+
+// Walls
+const walls = [];
+function makeWall(w, h, d) {
+  const g = new THREE.BoxGeometry(w, h, d);
+  const m = new THREE.MeshStandardMaterial({ color: 0x11224a, metalness: 0.1, roughness: 0.8 });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+// Four walls around the border
+const thickness = 0.8;
+const wallZ1 = makeWall(roomSize, wallH, thickness); wallZ1.position.set(0, wallH/2, -roomSize/2);
+const wallZ2 = makeWall(roomSize, wallH, thickness); wallZ2.position.set(0, wallH/2,  roomSize/2);
+const wallX1 = makeWall(thickness, wallH, roomSize); wallX1.position.set(-roomSize/2, wallH/2, 0);
+const wallX2 = makeWall(thickness, wallH, roomSize); wallX2.position.set( roomSize/2, wallH/2, 0);
+scene.add(wallZ1, wallZ2, wallX1, wallX2);
+walls.push(wallZ1, wallZ2, wallX1, wallX2);
+
+// ---------- Obstacles ----------
+let obstacles = [];              // Meshes
+let obstacleBoxes = [];          // Box3 bounds
+function clearObstacles(){
+  for(const m of obstacles) scene.remove(m);
+  obstacles.length = 0;
+  obstacleBoxes.length = 0;
+}
+function addRandomObstacles(n=45){
+  const matBox = new THREE.MeshStandardMaterial({ color: 0x3a58a3, metalness: 0.2, roughness: 0.7 });
+  const matCyl = new THREE.MeshStandardMaterial({ color: 0x7c2a30, metalness: 0.2, roughness: 0.7 });
+
+  for(let i=0;i<n;i++){
+    const size = THREE.MathUtils.randFloat(0.8, 2.4);
+    const isBox = Math.random() < 0.6;
+    let geo, mat;
+    if(isBox){
+      geo = new THREE.BoxGeometry(size, size, size);
+      mat = matBox;
+    }else{
+      geo = new THREE.CylinderGeometry(size*0.45, size*0.45, size, 16);
+      mat = matCyl;
+    }
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    // Random position with margin from walls
+    const margin = 1.5 + size*0.5;
+    mesh.position.set(
+      THREE.MathUtils.randFloatSpread(roomSize - margin*2),
+      size*0.5,
+      THREE.MathUtils.randFloatSpread(roomSize - margin*2)
+    );
+    // Random yaw
+    mesh.rotation.y = Math.random()*Math.PI*2;
+
+    // Simple rejection to avoid overlapping walls too closely
+    const minDist = 1.0;
+    let tries = 0;
+    let ok = true;
+    do {
+      ok = true;
+      for(const other of obstacles){
+        if (mesh.position.distanceTo(other.position) < minDist + size*0.5) { ok=false; break; }
+      }
+      if(!ok){
+        mesh.position.set(
+          THREE.MathUtils.randFloatSpread(roomSize - margin*2),
+          size*0.5,
+          THREE.MathUtils.randFloatSpread(roomSize - margin*2)
+        );
+      }
+    } while(!ok && ++tries < 10);
+
+    scene.add(mesh);
+    obstacles.push(mesh);
+  }
+  // Precompute static boxes
+  obstacleBoxes = obstacles.map(m => new THREE.Box3().setFromObject(m));
+}
+
+// ---------- Agent ----------
+const agentRadius = 0.45;
+const agentGeo = new THREE.CylinderGeometry(agentRadius, agentRadius, 0.2, 20);
+const agentMat = new THREE.MeshStandardMaterial({ color: 0x19d38a, metalness: 0.2, roughness: 0.6 });
+const agent = new THREE.Mesh(agentGeo, agentMat);
+agent.rotation.x = Math.PI/2;
+scene.add(agent);
+
+let dir2 = new THREE.Vector2(1, 0).normalize();
+let speed = 0.6;          // world units per second
+let turnJitter = 0.2;     // random radians per second
+let paused = false;
+let hits = 0;
+let tStart = performance.now();
+
+function resetAgent(){
+  agent.position.set(0, agentRadius, 0);
+  // random facing
+  const a = Math.random()*Math.PI*2;
+  dir2.set(Math.cos(a), Math.sin(a));
+  hits = 0;
+  visited.clear();
+  obstaclesSeen.clear();
+  cellsVisitedEl.textContent = '0';
+  hitsEl.textContent = '0';
+  tStart = performance.now();
+}
+
+// ---------- Mapping (occupancy-lite) ----------
+const gridN = 80;                   // grid cells per side
+const cellSize = roomSize / gridN;  // world units per cell
+const visited = new Set();          // "ix,iz" => free/visited
+const obstaclesSeen = new Set();    // "ix,iz" where collision occurred
+
+function worldToCell(px, pz){
+  const ix = Math.floor((px + roomSize/2) / cellSize);
+  const iz = Math.floor((pz + roomSize/2) / cellSize);
+  return {ix, iz};
+}
+function markVisited(px, pz){
+  const {ix, iz} = worldToCell(px, pz);
+  if(ix>=0 && ix<gridN && iz>=0 && iz<gridN){
+    const k = ix+','+iz;
+    if(!visited.has(k)){
+      visited.add(k);
+      cellsVisitedEl.textContent = String(visited.size);
+    }
+  }
+}
+function markObstacle(px, pz){
+  const {ix, iz} = worldToCell(px, pz);
+  if(ix>=0 && ix<gridN && iz>=0 && iz<gridN){
+    obstaclesSeen.add(ix+','+iz);
+  }
+}
+
+// Draw minimap
+function drawMinimap(){
+  const w = mini.width, h = mini.height;
+  ctx2d.fillStyle = '#0b1533'; // unknown
+  ctx2d.fillRect(0,0,w,h);
+
+  const sx = w / gridN, sz = h / gridN;
+
+  // visited
+  ctx2d.fillStyle = '#6b7bbf';
+  for(const k of visited){
+    const [ix, iz] = k.split(',').map(Number);
+    ctx2d.fillRect(ix*sx, iz*sz, sx, sz);
+  }
+  // obstacle contacts
+  ctx2d.fillStyle = '#ff7b72';
+  for(const k of obstaclesSeen){
+    const [ix, iz] = k.split(',').map(Number);
+    ctx2d.fillRect(ix*sx, iz*sz, sx, sz);
+  }
+  // agent
+  const c = worldToCell(agent.position.x, agent.position.z);
+  ctx2d.fillStyle = '#7ee787';
+  ctx2d.fillRect(c.ix*sx, c.iz*sz, sx, sz);
+
+  // Draw a small direction arrow
+  ctx2d.save();
+  ctx2d.translate((c.ix+0.5)*sx, (c.iz+0.5)*sz);
+  const ang = Math.atan2(dir2.y, dir2.x);
+  ctx2d.rotate(ang);
+  ctx2d.fillRect(0, -1, sx*0.6, 2);
+  ctx2d.restore();
+}
+
+// ---------- Movement & Collision ----------
+const tmpAgentBox = new THREE.Box3();
+const tmpObsBox = new THREE.Box3();
+
+function step(dt){
+  // Random micro turning (jitter)
+  const jitter = (Math.random()-0.5) * turnJitter * dt * 6.0; // scale factor for feel
+  const ca = Math.cos(jitter), sa = Math.sin(jitter);
+  const nx = dir2.x*ca - dir2.y*sa;
+  const ny = dir2.x*sa + dir2.y*ca;
+  dir2.set(nx, ny).normalize();
+
+  // Move
+  const moveDist = speed * dt;
+  const nextX = agent.position.x + dir2.x * moveDist;
+  const nextZ = agent.position.z + dir2.y * moveDist;
+
+  // Check wall bounds (treat walls as solid border)
+  const pad = agentRadius + 0.15;
+  let bounced = false;
+  if (nextX > ( roomSize/2 - pad)) { dir2.x *= -1; bounced = true; }
+  if (nextX < (-roomSize/2 + pad)) { dir2.x *= -1; bounced = true; }
+  if (nextZ > ( roomSize/2 - pad)) { dir2.y *= -1; bounced = true; }
+  if (nextZ < (-roomSize/2 + pad)) { dir2.y *= -1; bounced = true; }
+  if (!bounced) {
+    agent.position.x = nextX;
+    agent.position.z = nextZ;
+  } else {
+    hits++;
+    hitsEl.textContent = String(hits);
+    markObstacle(agent.position.x + dir2.x*cellSize*0.5, agent.position.z + dir2.y*cellSize*0.5);
+    // slight random turn on bounce
+    const turn = (Math.random()*1.6 - 0.8);
+    const c = Math.cos(turn), s = Math.sin(turn);
+    dir2.set(dir2.x*c - dir2.y*s, dir2.x*s + dir2.y*c).normalize();
+  }
+
+  // Obstacle collision via Box3
+  // Update agent box around current position: approximate with small box
+  const s = agentRadius*2;
+  tmpAgentBox.min.set(agent.position.x - s*0.5, 0, agent.position.z - s*0.5);
+  tmpAgentBox.max.set(agent.position.x + s*0.5, 0.4, agent.position.z + s*0.5);
+
+  for(let i=0;i<obstacleBoxes.length;i++){
+    const ob = obstacleBoxes[i];
+    // static; but ensure we're using up-to-date box (if obstacles moved, we'd recalc)
+    tmpObsBox.copy(ob);
+    if (tmpAgentBox.intersectsBox(tmpObsBox)){
+      // back up a bit and choose a new direction
+      agent.position.x -= dir2.x * moveDist * 1.2;
+      agent.position.z -= dir2.y * moveDist * 1.2;
+      const turn = (Math.random()*Math.PI*1.2 - Math.PI*0.6);
+      const c = Math.cos(turn), s = Math.sin(turn);
+      dir2.set(dir2.x*c - dir2.y*s, dir2.x*s + dir2.y*c).normalize();
+      hits++;
+      hitsEl.textContent = String(hits);
+      markObstacle(agent.position.x + dir2.x*cellSize*0.5, agent.position.z + dir2.y*cellSize*0.5);
+      break;
+    }
+  }
+
+  // Mark visited
+  markVisited(agent.position.x, agent.position.z);
+}
+
+// ---------- Controls ----------
+function handleResize(){
+  const w = cvs.clientWidth;
+  const h = cvs.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(handleResize).observe(cvs);
+handleResize();
+
+speedEl.addEventListener('input', () => {
+  speed = Number(speedEl.value) / 100;
+  speedVal.textContent = speed.toFixed(2);
+});
+jitterEl.addEventListener('input', () => {
+  turnJitter = Number(jitterEl.value) / 100;
+  jitterVal.textContent = turnJitter.toFixed(2);
+});
+btnPause.addEventListener('click', () => {
+  paused = !paused;
+  btnPause.textContent = paused ? 'Resume' : 'Pause';
+});
+btnReset.addEventListener('click', resetAgent);
+btnRegen.addEventListener('click', () => {
+  clearObstacles();
+  addRandomObstacles(Number(obsCountEl.value || 45));
+  resetAgent();
+});
+
+// ---------- Initialization ----------
+addRandomObstacles(Number(obsCountEl.value || 45));
+resetAgent();
+
+// ---------- Loop ----------
+let last = performance.now();
+function animate(now){
+  requestAnimationFrame(animate);
+  controls.update();
+
+  const dt = Math.min(0.05, (now - last) / 1000); // clamp dt
+  last = now;
+
+  if(!paused) {
+    step(dt);
+    const t = (now - tStart)/1000;
+    timeEl.textContent = t.toFixed(1);
+  }
+
+  renderer.render(scene, camera);
+  drawMinimap();
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

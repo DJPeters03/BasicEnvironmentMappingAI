@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Territory Race 3D — 80×80 Singular Tiles (Black Start)</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#0f1730; --ink:#e8eefc; --muted:#9fb3ff;
+    --green:#00ff9c; --red:#ff4d6d; --blue:#4da3ff; --black:#000000; --grid:#1a264a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #wrap{position:fixed; inset:0; display:grid; grid-template-rows:auto 1fr; gap:0; min-height:100vh}
+  header{display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--panel); border-bottom:1px solid #152347; flex-wrap:wrap}
+  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+  .spacer{flex:1}
+  .btn, .num, .range {
+    background:#0b1533; color:var(--ink); border:1px solid #2a3c74; padding:6px 10px; border-radius:10px;
+  }
+  .btn{cursor:pointer; transition:.2s transform, .2s background}
+  .btn:hover{background:#0e1a3f; transform:translateY(-1px)}
+  .stat{font-variant-numeric:tabular-nums}
+  main{display:grid; grid-template-columns:1fr 320px; gap:0; min-height:0}
+  #view{display:block; width:100%; height:100%}
+  aside{background:var(--panel); border-left:1px solid #152347; padding:12px; overflow:auto}
+  .row{display:flex; align-items:center; gap:10px; margin-bottom:10px}
+  .bar{height:12px; background:#0b1533; border:1px solid #2a3c74; border-radius:8px; overflow:hidden}
+  .bar > div{height:100%}
+  .bar .g{background:var(--green)}
+  .bar .r{background:var(--red)}
+  #banner{
+    position:fixed; inset:auto 0 24px 0; display:none; justify-content:center;
+    pointer-events:none; text-align:center; font-weight:700; font-size:20px; color:#fff;
+  }
+  #banner span{
+    background: linear-gradient(90deg, rgba(0,0,0,.35), rgba(0,0,0,.5), rgba(0,0,0,.35));
+    padding:8px 14px; border-radius:12px; border:1px solid #2a3c74;
+    box-shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>Territory Race 3D — Green vs Red (80×80, Black Start)</h1>
+    <div class="spacer"></div>
+    <div class="row">
+      <label>Grid</label>
+      <!-- Default 80; you can change if needed -->
+      <input id="gridN" class="num" type="number" min="20" max="140" value="80" style="width:72px">
+    </div>
+    <div class="row">
+      <label>Obstacles</label>
+      <input id="obsPct" class="num" type="number" min="0" max="50" value="15" style="width:72px">
+      <span class="stat">%</span>
+    </div>
+    <div class="row">
+      <label>Speed</label>
+      <input id="speed" class="range" type="range" min="1" max="30" value="12">
+      <span class="stat" id="speedVal">12</span>
+    </div>
+    <button id="btnReset" class="btn">Reset Same Map</button>
+    <button id="btnRegen" class="btn">Regenerate Map</button>
+    <button id="btnPause" class="btn">Pause</button>
+  </header>
+
+  <main>
+    <canvas id="view"></canvas>
+    <aside>
+      <div class="row" style="justify-content:space-between">
+        <div>Green tiles:</div><div class="stat" id="gCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Red tiles:</div><div class="stat" id="rCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Free tiles (score base):</div><div class="stat" id="freeCount">0</div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div>Green %:</div><div class="stat" id="gPct">0.0%</div>
+      </div>
+      <div class="bar"><div class="g" id="gBar" style="width:0%"></div></div>
+      <div class="row" style="justify-content:space-between; margin-top:10px">
+        <div>Red %:</div><div class="stat" id="rPct">0.0%</div>
+      </div>
+      <div class="bar"><div class="r" id="rBar" style="width:0%"></div></div>
+      <div style="margin-top:12px; color:#9fb3ff99; font-size:12px">
+        • Floor = 80×80 singular tiles. All start black.<br>
+        • First visit permanently paints a tile (no overwriting).<br>
+        • Obstacles are blue; excluded from score. Game stops at 55%+.
+      </div>
+    </aside>
+  </main>
+</div>
+
+<div id="banner"><span></span></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+(() => {
+  // ====== DOM ======
+  const canvas = document.getElementById('view');
+  const gCountEl = document.getElementById('gCount');
+  const rCountEl = document.getElementById('rCount');
+  const freeCountEl = document.getElementById('freeCount');
+  const gPctEl = document.getElementById('gPct');
+  const rPctEl = document.getElementById('rPct');
+  const gBar = document.getElementById('gBar');
+  const rBar = document.getElementById('rBar');
+  const gridNEl = document.getElementById('gridN');
+  const obsPctEl = document.getElementById('obsPct');
+  const speedEl = document.getElementById('speed');
+  const speedVal = document.getElementById('speedVal');
+  const btnReset = document.getElementById('btnReset');
+  const btnRegen = document.getElementById('btnRegen');
+  const btnPause = document.getElementById('btnPause');
+  const banner = document.getElementById('banner');
+  const bannerText = banner.querySelector('span');
+
+  // ====== Colors ======
+  const css = getComputedStyle(document.documentElement);
+  const HEX_BLACK = css.getPropertyValue('--black').trim()  || '#000000';
+  const HEX_GREEN = css.getPropertyValue('--green').trim()  || '#00ff9c';
+  const HEX_RED   = css.getPropertyValue('--red').trim()    || '#ff4d6d';
+  const HEX_BLUE  = css.getPropertyValue('--blue').trim()   || '#4da3ff';
+  const HEX_GRID  = css.getPropertyValue('--grid').trim()   || '#1a264a';
+
+  const COL_BLACK = new THREE.Color(HEX_BLACK);
+  const COL_GREEN = new THREE.Color(HEX_GREEN);
+  const COL_RED   = new THREE.Color(HEX_RED);
+  const COL_BLUE  = new THREE.Color(HEX_BLUE);
+  const COL_GRID  = new THREE.Color(HEX_GRID);
+
+  // ====== Three.js setup ======
+  const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x061129);
+
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
+  camera.position.set(0, 60, 60);
+  camera.lookAt(0, 0, 0);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.target.set(0, 0, 0);
+
+  // Lights (obstacles & agents use Standard; floor is Basic self-lit)
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x223355, 0.8));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+  dir.position.set(30, 50, 10);
+  scene.add(dir);
+
+  function onResize(){
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width, h = rect.height;
+    renderer.setSize(w, h, false);
+    camera.aspect = w/h;
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(onResize).observe(canvas);
+  onResize();
+
+  // ====== Grid / Map ======
+  const TILE_EMPTY = 0;
+  const TILE_OBS   = 1;
+  const CLAIM_NONE = 0;
+  const CLAIM_GREEN= 1;
+  const CLAIM_RED  = 2;
+
+  let N = Number(gridNEl.value);      // default 80 => 80×80 singular tiles
+  let tiles, claim, totalFree = 0;
+  let cellSize = 1.0;                 // 1 world unit per cell
+  let speedStepsPerFrame = Number(speedEl.value);
+  let paused = false;
+  let gameOver = false;
+  const STOP_THRESHOLD = 55.0;
+
+  // Instanced meshes
+  let floorIMesh, obsIMesh, gridHelper;
+
+  // agents
+  const agents = [
+    { color: CLAIM_GREEN, x:1, y:1, lastMoveDir:null, mesh:null, mat:null },
+    { color: CLAIM_RED,   x:null, y:null, lastMoveDir:null, mesh:null, mat:null }
+  ];
+
+  function idx(x,y){ return y*N + x; }
+  function inB(x,y){ return x>=0 && x<N && y>=0 && y<N; }
+  function gx(x){ return (x - (N-1)/2) * cellSize; }
+  function gz(y){ return (y - (N-1)/2) * cellSize; }
+
+  // ====== Geometry / Materials ======
+  // Each floor tile is its own instance (singular tile), starts pure black.
+  const tileGeo = new THREE.BoxGeometry(cellSize, 0.04, cellSize);
+  const tileMat = new THREE.MeshBasicMaterial({ vertexColors: true }); // self-lit for bright colors
+
+  const obsGeo  = new THREE.BoxGeometry(cellSize*0.98, 0.9, cellSize*0.98);
+  const obsMat  = new THREE.MeshStandardMaterial({ color: COL_BLUE, metalness:0.15, roughness:0.5 });
+
+  const agentGeo= new THREE.CylinderGeometry(0.35, 0.35, 0.22, 24);
+
+  function rebuildFloor(){
+    if(floorIMesh) scene.remove(floorIMesh);
+    floorIMesh = new THREE.InstancedMesh(tileGeo, tileMat, N*N);
+    floorIMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    floorIMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N*N*3), 3);
+    scene.add(floorIMesh);
+  }
+  function rebuildObstacles(count){
+    if(obsIMesh) scene.remove(obsIMesh);
+    obsIMesh = new THREE.InstancedMesh(obsGeo, obsMat, count);
+    obsIMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(obsIMesh);
+  }
+  function rebuildGridHelper(){
+    if(gridHelper) scene.remove(gridHelper);
+    gridHelper = new THREE.GridHelper(N*cellSize, N, COL_GRID, COL_GRID);
+    gridHelper.position.y = 0.021;
+    scene.add(gridHelper);
+  }
+
+  // ====== Map generation ======
+  let seededMap = null;
+  function generateMap(seed=null){
+    if(seed){
+      ({N, tiles, claim, totalFree} = seed);
+      return;
+    }
+    N = Number(gridNEl.value); // keep as 80 by default
+    tiles = new Uint8Array(N*N);
+    claim = new Uint8Array(N*N);
+
+    const pct = Math.max(0, Math.min(50, Number(obsPctEl.value))) / 100;
+    const targetObs = Math.round(N*N*pct);
+    let placed = 0;
+    const triesMax = N*N*5;
+    let tries = 0;
+
+    while(placed < targetObs && tries < triesMax){
+      tries++;
+      const w = 2 + (Math.random()*6)|0;
+      const h = 2 + (Math.random()*6)|0;
+      const x0 = (Math.random()*(N-w))|0;
+      const y0 = (Math.random()*(N-h))|0;
+
+      // protect spawn corners
+      if ((x0<=2 && y0<=2) || (x0+w>=N-3 && y0+h>=N-3)) continue;
+
+      for(let y=y0; y<y0+h && placed < targetObs; y++){
+        for(let x=x0; x<x0+w && placed < targetObs; x++){
+          const id = idx(x,y);
+          if(tiles[id] === TILE_EMPTY){
+            tiles[id] = TILE_OBS; placed++;
+          }
+        }
+      }
+    }
+
+    // ensure spawns free
+    tiles[idx(1,1)] = TILE_EMPTY;
+    tiles[idx(N-2,N-2)] = TILE_EMPTY;
+
+    totalFree = 0;
+    for(let i=0;i<tiles.length;i++) if(tiles[i]===TILE_EMPTY) totalFree++;
+
+    seededMap = {N, tiles: tiles.slice(0), claim: new Uint8Array(tiles.length), totalFree};
+  }
+
+  function resetAgents(){
+    agents[0].x = 1; agents[0].y = 1; agents[0].lastMoveDir = null;
+    agents[1].x = N-2; agents[1].y = N-2; agents[1].lastMoveDir = null;
+    claim.fill(CLAIM_NONE);
+    claim[idx(agents[0].x, agents[0].y)] = CLAIM_GREEN;
+    claim[idx(agents[1].x, agents[1].y)] = CLAIM_RED;
+
+    for(const a of agents){
+      if(!a.mat){
+        a.mat = new THREE.MeshStandardMaterial({
+          color: (a.color===CLAIM_GREEN? COL_GREEN: COL_RED),
+          metalness:0.2, roughness:0.5,
+          emissive: (a.color===CLAIM_GREEN? COL_GREEN.clone(): COL_RED.clone()).multiplyScalar(0.18)
+        });
+      }
+      if(!a.mesh){
+        a.mesh = new THREE.Mesh(agentGeo, a.mat);
+        a.mesh.rotation.x = Math.PI/2;
+        scene.add(a.mesh);
+      }
+      a.mesh.position.set(gx(a.x), 0.16, gz(a.y));
+    }
+  }
+
+  // ====== Floor & Obstacles rendering ======
+  function paintFloorFromArrays(){
+    const M = new THREE.Matrix4();
+    const C = new THREE.Color();
+
+    // floor tiles: start every EMPTY tile as pure black; obstacles as blue
+    for(let y=0;y<N;y++){
+      for(let x=0;x<N;x++){
+        const id = idx(x,y);
+        M.makeTranslation(gx(x), 0, gz(y));
+        floorIMesh.setMatrixAt(id, M);
+
+        if(tiles[id] === TILE_OBS){
+          C.copy(COL_BLUE);
+        } else {
+          // Explicitly black for all non-obstacle, unclaimed tiles
+          const c = claim[id];
+          if(c===CLAIM_GREEN) C.copy(COL_GREEN);
+          else if(c===CLAIM_RED) C.copy(COL_RED);
+          else C.copy(COL_BLACK);
+        }
+        floorIMesh.instanceColor.setXYZ(id, C.r, C.g, C.b);
+      }
+    }
+    floorIMesh.instanceMatrix.needsUpdate = true;
+    floorIMesh.instanceColor.needsUpdate = true;
+
+    // obstacles as taller blocks
+    let count = 0;
+    for(let i=0;i<tiles.length;i++) if(tiles[i]===TILE_OBS) count++;
+    rebuildObstacles(count);
+
+    let k=0;
+    for(let y=0;y<N;y++){
+      for(let x=0;x<N;x++){
+        const id = idx(x,y);
+        if(tiles[id]!==TILE_OBS) continue;
+        const mm = new THREE.Matrix4().makeTranslation(gx(x), 0.45, gz(y));
+        obsIMesh.setMatrixAt(k++, mm);
+      }
+    }
+    if(obsIMesh) obsIMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // ====== Movement ======
+  const DIRS = [
+    {dx: 1, dy: 0}, {dx:-1, dy: 0}, {dx: 0, dy: 1}, {dx: 0, dy:-1},
+  ];
+
+  function stepAgent(a){
+    if(gameOver) return;
+
+    const opts = [];
+    const back = a.lastMoveDir ? {dx:-a.lastMoveDir.dx, dy:-a.lastMoveDir.dy} : null;
+
+    for(const d of DIRS){
+      const nx = a.x + d.dx, ny = a.y + d.dy;
+      if(!inB(nx,ny)) continue;
+      const id = idx(nx,ny);
+      if(tiles[id] === TILE_OBS) continue;
+      const isUnclaimed = (claim[id] === CLAIM_NONE);
+      const isBack = back && back.dx === d.dx && back.dy === d.dy;
+      const score = (isUnclaimed ? 2 : 1) - (isBack ? 0.4 : 0);
+      opts.push({d, nx, ny, score});
+    }
+    if(!opts.length) return;
+
+    // weighted random
+    let sum = 0;
+    for(const o of opts){ sum += Math.max(0.01, o.score); }
+    let r = Math.random()*sum;
+    let chosen = opts[0];
+    for(const o of opts){
+      r -= Math.max(0.01, o.score);
+      if(r<=0){ chosen = o; break; }
+    }
+
+    a.x = chosen.nx; a.y = chosen.ny;
+    a.lastMoveDir = chosen.d;
+
+    // claim once, permanent, no overwrite
+    const cid = idx(a.x, a.y);
+    if (claim[cid] === CLAIM_NONE){
+      claim[cid] = a.color;
+      // instantly recolor the floor tile to green/red
+      const col = (a.color===CLAIM_GREEN? COL_GREEN : COL_RED);
+      floorIMesh.instanceColor.setXYZ(cid, col.r, col.g, col.b);
+      floorIMesh.instanceColor.needsUpdate = true;
+    }
+
+    a.mesh.position.set(gx(a.x), 0.16, gz(a.y));
+  }
+
+  // ====== Stats + Stop ======
+  function recountAndMaybeStop(){
+    let g=0, r=0;
+    for(let i=0;i<claim.length;i++){
+      if(tiles[i]===TILE_OBS) continue;
+      if(claim[i]===CLAIM_GREEN) g++;
+      else if(claim[i]===CLAIM_RED) r++;
+    }
+    const gPct = totalFree ? (g/totalFree*100) : 0;
+    const rPct = totalFree ? (r/totalFree*100) : 0;
+
+    gCountEl.textContent = g;
+    rCountEl.textContent = r;
+    freeCountEl.textContent = totalFree;
+    gPctEl.textContent = gPct.toFixed(1) + '%';
+    rPctEl.textContent = rPct.toFixed(1) + '%';
+    gBar.style.width = gPct.toFixed(3) + '%';
+    rBar.style.width = rPct.toFixed(3) + '%';
+
+    if(!gameOver && (gPct > STOP_THRESHOLD || rPct > STOP_THRESHOLD)){
+      gameOver = true;
+      paused = true;
+      const winner = (gPct > rPct) ? 'Green' : 'Red';
+      bannerText.textContent = `${winner} wins (${winner==='Green'?gPct.toFixed(1):rPct.toFixed(1)}%)`;
+      banner.style.display = 'flex';
+    }
+  }
+
+  // ====== Build / Rebuild ======
+  function rebuildAll(){
+    rebuildGridHelper();
+    rebuildFloor();
+    paintFloorFromArrays();
+  }
+
+  // ====== Controls ======
+  speedEl.addEventListener('input', () => {
+    speedStepsPerFrame = Number(speedEl.value);
+    speedVal.textContent = String(speedStepsPerFrame);
+  });
+  speedVal.textContent = String(speedStepsPerFrame);
+
+  btnPause.addEventListener('click', () => {
+    paused = !paused;
+    if(!gameOver){
+      btnPause.textContent = paused ? 'Resume' : 'Pause';
+    }
+  });
+
+  btnReset.addEventListener('click', () => {
+    if(seededMap){
+      generateMap(seededMap);
+      claim = new Uint8Array(N*N);
+    }
+    banner.style.display = 'none';
+    gameOver = false;
+    paused = false;
+    btnPause.textContent = 'Pause';
+    rebuildAll();
+    resetAgents();
+    recountAndMaybeStop();
+  });
+
+  btnRegen.addEventListener('click', () => {
+    seededMap = null;
+    generateMap(null);
+    banner.style.display = 'none';
+    gameOver = false;
+    paused = false;
+    btnPause.textContent = 'Pause';
+    rebuildAll();
+    resetAgents();
+    recountAndMaybeStop();
+  });
+
+  function applyAndRegen(){
+    seededMap = null;
+    generateMap(null);
+    banner.style.display = 'none';
+    gameOver = false;
+    paused = false;
+    btnPause.textContent = 'Pause';
+    rebuildAll();
+    resetAgents();
+    recountAndMaybeStop();
+  }
+  gridNEl.addEventListener('change', applyAndRegen);
+  obsPctEl.addEventListener('change', applyAndRegen);
+
+  // ====== Init ======
+  generateMap(null);
+  rebuildAll();
+  resetAgents();
+  recountAndMaybeStop();
+
+  // ====== Loop ======
+  function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    if(!paused){
+      for(let k=0;k<speedStepsPerFrame;k++){
+        stepAgent(agents[0]);
+        stepAgent(agents[1]);
+      }
+      recountAndMaybeStop();
+    }
+    renderer.render(scene, camera);
+  }
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>
